@@ -191,8 +191,21 @@ function letraParaIndiceColuna(letra) {
 
 function extrairIdPlanilha(texto) {
   texto = String(texto).trim();
-  var resultado = texto.match(/\/spreadsheets\/d\/([a-zA-Z0-9_-]+)/);
-  if (resultado && resultado[1]) return resultado[1];
-  if (/^[a-zA-Z0-9_-]+$/.test(texto)) return texto;
+
+  // Google Sheets nativo: /spreadsheets/d/ID
+  var padraoSheets = texto.match(/\/spreadsheets\/d\/([a-zA-Z0-9_-]+)/);
+  if (padraoSheets && padraoSheets[1]) return padraoSheets[1];
+
+  // Arquivo genérico do Drive (Excel, PDF, etc): /file/d/ID
+  var padraoArquivo = texto.match(/\/file\/d\/([a-zA-Z0-9_-]+)/);
+  if (padraoArquivo && padraoArquivo[1]) return padraoArquivo[1];
+
+  // Formato alternativo: ?id=ID (usado em alguns links de compartilhamento)
+  var padraoQuery = texto.match(/[?&]id=([a-zA-Z0-9_-]+)/);
+  if (padraoQuery && padraoQuery[1]) return padraoQuery[1];
+
+  // Se o valor já for só o ID puro
+  if (/^[a-zA-Z0-9_-]{15,}$/.test(texto)) return texto;
+
   return null;
 }
