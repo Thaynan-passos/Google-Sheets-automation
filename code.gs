@@ -1,211 +1,333 @@
+/**
+ * Adiciona um menu personalizado na barra superior do Google Sheets ao abrir a planilha.
+ */
+function onOpen() {
+  SpreadsheetApp.getUi()
+    .createMenu("🚀 Automação Drive")
+    .addItem("Alterar Permissões em Massa", "liberarPlanilhasSelecionadas")
+    .addToUi();
+}
+
+/**
+ * Função principal para processamento em lote de permissões no Google Drive.
+ * Suporta planilhas, arquivos avulsos e pastas (com opção de replicar aos arquivos internos).
+ */
 function liberarPlanilhasSelecionadas() {
-  var ui = SpreadsheetApp.getUi();
-  var planilhaControle = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
-  var ultimaLinha = planilhaControle.getLastRow();
+  const ui = SpreadsheetApp.getUi();
+  const abaAtiva = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  const ultimaLinha = abaAtiva.getLastRow();
 
   if (ultimaLinha < 2) {
-    ui.alert("Não existem planilhas para processar.");
+    ui.alert("Aviso", "Não existem linhas para processar a partir da linha 2.", ui.ButtonSet.OK);
     return;
   }
 
-  var respostaColuna = ui.prompt(
-    "Coluna dos links",
-    "Digite a letra da coluna onde estão os links ou IDs das planilhas (ex: A, B, C...):",
+  // 1. Pergunta a coluna dos links ou IDs
+  const respColuna = ui.prompt(
+    "Coluna dos links ou IDs",
+    "Digite a letra da coluna onde estão os links ou IDs (ex: A, B, C...):",
     ui.ButtonSet.OK_CANCEL
   );
-  if (respostaColuna.getSelectedButton() !== ui.Button.OK) return;
+  if (respColuna.getSelectedButton() !== ui.Button.OK) return;
 
-  var colunaLetra = respostaColuna.getResponseText().trim().toUpperCase();
+  const colunaLetra = respColuna.getResponseText().trim().toUpperCase();
   if (!/^[A-Z]+$/.test(colunaLetra)) {
-    ui.alert("Coluna inválida. Digite apenas letras, ex: A, B, C.");
+    ui.alert("Coluna inválida. Digite apenas letras (ex: A, B, AA).");
     return;
   }
-  var colunaIndice = letraParaIndiceColuna(colunaLetra);
+  const colunaIndice = letraParaIndiceColuna(colunaLetra);
 
-  var respostaAcesso = ui.prompt(
-    "Tipo de acesso",
-    "Escolha o tipo de acesso digitando o número correspondente:\n\n" +
-      "1 - Bloquear acesso (privado, somente quem já tem acesso explícito)\n" +
-      "2 - Restringir ao domínio da organização (quem tem o link, só dentro do domínio)\n" +
-      "3 - Liberar para qualquer pessoa com o link",
+  // 2. Pergunta o tipo de visibilidade do link
+  const respAcesso = ui.prompt(
+    "Tipo de Visibilidade",
+    "Escolha o tipo de visibilidade do link digitando o número correspondente:\n\n" +
+      "1 - Bloqueado / Privado (somente quem já tem permissão direta)\n" +
+      "2 - Restrito ao domínio da organização (com o link)\n" +
+      "3 - Qualquer pessoa com o link",
     ui.ButtonSet.OK_CANCEL
   );
-  if (respostaAcesso.getSelectedButton() !== ui.Button.OK) return;
+  if (respAcesso.getSelectedButton() !== ui.Button.OK) return;
 
-  var opcaoAcesso = respostaAcesso.getResponseText().trim();
-  var configuracaoAcesso = obterConfiguracaoAcesso(opcaoAcesso);
-  if (!configuracaoAcesso) {
+  const tipoAcesso = mapearTipoAcesso(respAcesso.getResponseText().trim());
+  if (!tipoAcesso) {
     ui.alert("Opção inválida. Digite 1, 2 ou 3.");
     return;
   }
 
-  var dados = planilhaControle
-    .getRange(2, colunaIndice, ultimaLinha - 1, 1)
-    .getValues();
+  // 3. Se não for privado, escolhe o nível de permissão concedido pelo link
+  let permissaoEscolhida = DriveApp.Permission.VIEW;
+  let descPermissao = "Leitor";
 
-  var sucesso = 0;
-  var erros = 0;
-  var detalhesErros = []; // guarda linha + descrição amigável de cada erro
+  if (tipoAcesso.access !== DriveApp.Access.PRIVATE) {
+    const respPermissao = ui.prompt(
+      "Nível de Permissão",
+      "Qual permissão conceder para quem acessar o link?\n\n" +
+        "1 - Leitor (Somente visualização)\n" +
+        "2 - Comentador (Pode comentar)\n" +
+        "3 - Editor (Pode editar)",
+      ui.ButtonSet.OK_CANCEL
+    );
+    if (respPermissao.getSelectedButton() !== ui.Button.OK) return;
 
-  for (var i = 0; i < dados.length; i++) {
-    var linha = i + 2;
-    var valor = String(dados[i][0]).trim();
-    if (valor === "") continue;
+    switch (respPermissao.getResponseText().trim()) {
+      case "1":
+        permissaoEscolhida = DriveApp.Permission.VIEW;
+        descPermissao = "Leitor";
+        break;
+      case "2":
+        permissaoEscolhida = DriveApp.Permission.COMMENT;
+        descPermissao = "Comentador";
+        break;
+      case "3":
+        permissaoEscolhida = DriveApp.Permission.EDIT;
+        descPermissao = "Editor";
+        break;
+      default:
+        ui.alert("Opção inválida. Operação cancelada.");
+        return;
+    }
+  }
+
+  // 4. Pergunta sobre o comportamento em caso de pastas
+  const propagarArquivosPasta = ui.alert(
+    "Comportamento com Pastas",
+    "Se houver pastas na lista, deseja aplicar a mesma permissão a TODOS os arquivos dentro delas?",
+    ui.ButtonSet.YES_NO
+  ) === ui.Button.YES;
+
+  // 5. Pergunta se deseja registrar o status na planilha
+  const gravarStatus = ui.alert(
+    "Gravar Status na Planilha?",
+    "Deseja gravar o resultado (Sucesso/Erro) na coluna ao lado dos links?",
+    ui.ButtonSet.YES_NO
+  ) === ui.Button.YES;
+
+  const totalLinhas = ultimaLinha - 1;
+  const dados = abaAtiva.getRange(2, colunaIndice, totalLinhas, 1).getValues();
+
+  const colunaStatusIndice = colunaIndice + 1;
+  const statusAtualizacoes = [];
+
+  let sucesso = 0;
+  let erros = 0;
+  let ignorados = 0;
+  const detalhesErros = [];
+
+  for (let i = 0; i < dados.length; i++) {
+    const linha = i + 2;
+    const valor = String(dados[i][0]).trim();
+
+    if (!valor) {
+      statusAtualizacoes.push([""]);
+      ignorados++;
+      continue;
+    }
 
     try {
-      var arquivoId = extrairIdPlanilha(valor);
-      if (!arquivoId) {
+      const infoItem = extrairInfoDrive(valor);
+      if (!infoItem) {
         throw new Error("ID_INVALIDO");
       }
 
-      var arquivo;
-      try {
-        arquivo = DriveApp.getFileById(arquivoId);
-        // Força uma leitura de metadado para "estourar" erro de permissão/existência aqui,
-        // em vez de só na hora do setSharing.
-        arquivo.getName();
-      } catch (erroAcesso) {
-        // Repassa para o catch externo, já identificando a origem
-        throw new Error("ACESSO_DRIVE::" + erroAcesso.message);
-      }
+      let nomeItem = "";
 
-      try {
-        if (configuracaoAcesso.access === DriveApp.Access.PRIVATE) {
-          arquivo.setSharing(configuracaoAcesso.access, DriveApp.Permission.NONE);
-        } else {
-          arquivo.setSharing(configuracaoAcesso.access, configuracaoAcesso.permission);
+      if (infoItem.tipo === "PASTA") {
+        const pasta = DriveApp.getFolderById(infoItem.id);
+        nomeItem = pasta.getName();
+
+        // Altera a pasta
+        aplicarPermissao(pasta, tipoAcesso.access, permissaoEscolhida);
+
+        // Se solicitado, replica aos arquivos contidos
+        let countFilhos = 0;
+        if (propagarArquivosPasta) {
+          countFilhos = propagarPermissaoPasta(pasta, tipoAcesso.access, permissaoEscolhida);
         }
-      } catch (erroSharing) {
-        throw new Error("SHARING::" + erroSharing.message);
-      }
 
-      sucesso++;
-      Logger.log("Linha " + linha + ": '" + arquivo.getName() + "' → " + configuracaoAcesso.descricao);
+        sucesso++;
+        const infoSub = propagarArquivosPasta ? ` (+${countFilhos} arquivos internos)` : "";
+        statusAtualizacoes.push([`✅ Pasta atualizada${infoSub}`]);
+        Logger.log(`Linha ${linha}: Pasta '${nomeItem}' atualizada.`);
+
+      } else {
+        // Arquivo ou Planilha
+        const arquivo = DriveApp.getFileById(infoItem.id);
+        nomeItem = arquivo.getName();
+
+        aplicarPermissao(arquivo, tipoAcesso.access, permissaoEscolhida);
+
+        sucesso++;
+        statusAtualizacoes.push([`✅ Arquivo atualizado (${tipoAcesso.descricao})`]);
+        Logger.log(`Linha ${linha}: '${nomeItem}' → ${tipoAcesso.descricao}`);
+      }
 
     } catch (erro) {
       erros++;
-      var descricaoAmigavel = interpretarErro(erro, valor);
-      detalhesErros.push("Linha " + linha + ": " + descricaoAmigavel);
-      Logger.log("ERRO linha " + linha + " (valor='" + valor + "'): " + erro.message);
+      const descricaoAmigavel = interpretarErro(erro, valor);
+      statusAtualizacoes.push([`❌ ${descricaoAmigavel}`]);
+      detalhesErros.push(`Linha ${linha}: ${descricaoAmigavel}`);
+      Logger.log(`ERRO linha ${linha} (valor='${valor}'): ${erro.message}`);
     }
   }
 
-  var mensagemFinal =
-    "Automação concluída!\n\n" +
-    "Coluna usada: " + colunaLetra + "\n" +
-    "Tipo de acesso: " + configuracaoAcesso.descricao + "\n" +
-    "Planilhas atualizadas: " + sucesso + "\n" +
-    "Erros: " + erros;
+  // Grava o status na planilha de uma vez só em lote
+  if (gravarStatus) {
+    abaAtiva.getRange(1, colunaStatusIndice).setValue("Status da Automação");
+    abaAtiva.getRange(2, colunaStatusIndice, statusAtualizacoes.length, 1).setValues(statusAtualizacoes);
+  }
+
+  // Resumo final
+  let mensagemFinal =
+    `Automação concluída!\n\n` +
+    `• Coluna processada: ${colunaLetra}\n` +
+    `• Visibilidade: ${tipoAcesso.descricao}\n` +
+    (tipoAcesso.access !== DriveApp.Access.PRIVATE ? `• Permissão: ${descPermissao}\n` : "") +
+    `• Sucessos: ${sucesso}\n` +
+    `• Erros: ${erros}\n` +
+    `• Linhas em branco: ${ignorados}`;
 
   if (detalhesErros.length > 0) {
-    // Limita a exibição para não estourar o tamanho do alert
-    var maxExibidos = 15;
-    mensagemFinal += "\n\nDetalhes dos erros:\n" + detalhesErros.slice(0, maxExibidos).join("\n");
+    const maxExibidos = 10;
+    mensagemFinal += `\n\nResumo dos erros:\n` + detalhesErros.slice(0, maxExibidos).join("\n");
     if (detalhesErros.length > maxExibidos) {
-      mensagemFinal += "\n... e mais " + (detalhesErros.length - maxExibidos) + " erro(s). Veja o Logger para a lista completa.";
+      mensagemFinal += `\n... e mais ${detalhesErros.length - maxExibidos} erro(s). Veja na planilha ou no Logger.`;
     }
   }
 
-  ui.alert(mensagemFinal);
+  ui.alert("Resultado", mensagemFinal, ui.ButtonSet.OK);
 }
 
 /**
- * Traduz o erro cru (mensagem de exception do Apps Script) numa descrição
- * legível para o usuário. Centraliza toda a lógica de "que erro é esse".
+ * Aplica a regra de compartilhamento em um Arquivo ou Pasta.
  */
-function interpretarErro(erro, valorOriginal) {
-  var msg = erro.message || String(erro);
-
-  // Erro que nós mesmos lançamos ao não conseguir extrair o ID
-  if (msg.indexOf("ID_INVALIDO") !== -1) {
-    return "Não foi possível identificar um ID de planilha válido no valor '" + valorOriginal + "'.";
+function aplicarPermissao(itemDrive, access, permission) {
+  if (access === DriveApp.Access.PRIVATE) {
+    itemDrive.setSharing(access, DriveApp.Permission.NONE);
+  } else {
+    itemDrive.setSharing(access, permission);
   }
-
-  // Erros vindos do DriveApp.getFileById() ou arquivo.getName()
-  if (msg.indexOf("ACESSO_DRIVE::") === 0) {
-    var detalheDrive = msg.replace("ACESSO_DRIVE::", "");
-
-    if (/permission|permissão|access denied|does not have permission/i.test(detalheDrive)) {
-      return "Sem permissão para acessar esta planilha (você não tem acesso a ela ou ela pertence a outra conta).";
-    }
-    if (/not found|não encontrado|no such file/i.test(detalheDrive)) {
-      return "Planilha não encontrada. O ID pode estar errado ou o arquivo foi excluído/movido para a lixeira.";
-    }
-    if (/invalid.*id|id.*invalid/i.test(detalheDrive)) {
-      return "O ID extraído ('" + valorOriginal + "') não corresponde a nenhum arquivo do Drive.";
-    }
-    // Fallback: erro de acesso não categorizado
-    return "Erro ao acessar o arquivo no Drive: " + detalheDrive;
-  }
-
-  // Erros vindos do arquivo.setSharing()
-  if (msg.indexOf("SHARING::") === 0) {
-    var detalheSharing = msg.replace("SHARING::", "");
-
-    if (/owner|proprietário/i.test(detalheSharing)) {
-      return "Não é possível alterar o compartilhamento: você não é o proprietário deste arquivo.";
-    }
-    if (/permission|permissão/i.test(detalheSharing)) {
-      return "Sem permissão para alterar o compartilhamento desta planilha.";
-    }
-    if (/domain|domínio/i.test(detalheSharing)) {
-      return "Não foi possível aplicar a restrição de domínio (o arquivo pode não pertencer a uma organização com Google Workspace).";
-    }
-    return "Erro ao alterar o compartilhamento: " + detalheSharing;
-  }
-
-  // Limite de cota do Drive/Apps Script (comum em execuções longas)
-  if (/quota|limite/i.test(msg)) {
-    return "Limite de uso do Drive/Apps Script atingido. Tente novamente mais tarde ou processe menos linhas por vez.";
-  }
-
-  // Timeout de execução (Apps Script mata scripts com +6 min em conta free)
-  if (/exceeded maximum execution time/i.test(msg)) {
-    return "O script excedeu o tempo máximo de execução. Considere processar em lotes menores.";
-  }
-
-  // Qualquer coisa não prevista
-  return "Erro inesperado: " + msg;
 }
 
-function obterConfiguracaoAcesso(opcao) {
+/**
+ * Percorre recursivamente todos os arquivos e subpastas para aplicar a mesma permissão.
+ */
+function propagarPermissaoPasta(pasta, access, permission) {
+  let contador = 0;
+
+  // Arquivos da pasta atual
+  const arquivos = pasta.getFiles();
+  while (arquivos.hasNext()) {
+    const arq = arquivos.next();
+    try {
+      aplicarPermissao(arq, access, permission);
+      contador++;
+    } catch (e) {
+      Logger.log(`Não foi possível alterar arquivo filho '${arq.getName()}': ${e.message}`);
+    }
+  }
+
+  // Subpastas recursivas
+  const subpastas = pasta.getFolders();
+  while (subpastas.hasNext()) {
+    const sub = subpastas.next();
+    try {
+      aplicarPermissao(sub, access, permission);
+      contador += propagarPermissaoPasta(sub, access, permission);
+    } catch (e) {
+      Logger.log(`Não foi possível alterar subpasta '${sub.getName()}': ${e.message}`);
+    }
+  }
+
+  return contador;
+}
+
+/**
+ * Traduz o erro em uma mensagem amigável e explicativa.
+ */
+function interpretarErro(erro, valorOriginal) {
+  const msg = erro.message || String(erro);
+
+  if (msg.includes("ID_INVALIDO")) {
+    return `ID inválido no valor '${valorOriginal}'.`;
+  }
+  if (/permission|permissão|access denied|does not have permission/i.test(msg)) {
+    return "Sem permissão. Se você é apenas 'Leitor' do arquivo/pasta, o Google Drive não permite alterar o compartilhamento.";
+  }
+  if (/not found|não encontrado|no such file/i.test(msg)) {
+    return "Arquivo ou pasta não encontrado (ou está na lixeira).";
+  }
+  if (/owner|proprietário/i.test(msg)) {
+    return "Ação restrita ao proprietário do arquivo/pasta.";
+  }
+  if (/domain|domínio/i.test(msg)) {
+    return "Falha na restrição por domínio (o arquivo pode não pertencer a um Google Workspace).";
+  }
+  if (/quota|limite/i.test(msg)) {
+    return "Limite de cota da API do Drive atingido temporariamente.";
+  }
+  if (/exceeded maximum execution time/i.test(msg)) {
+    return "Tempo máximo de 6 minutos atingido.";
+  }
+
+  return `Erro inesperado: ${msg}`;
+}
+
+/**
+ * Mapeia o número da opção para a configuração de acesso do Drive.
+ */
+function mapearTipoAcesso(opcao) {
   switch (opcao) {
     case "1":
-      return { access: DriveApp.Access.PRIVATE, permission: DriveApp.Permission.NONE, descricao: "Bloqueado (privado)" };
+      return { access: DriveApp.Access.PRIVATE, descricao: "Bloqueado (Privado)" };
     case "2":
-      return { access: DriveApp.Access.DOMAIN_WITH_LINK, permission: DriveApp.Permission.VIEW, descricao: "Restrito ao domínio (com link)" };
+      return { access: DriveApp.Access.DOMAIN_WITH_LINK, descricao: "Restrito ao domínio" };
     case "3":
-      return { access: DriveApp.Access.ANYONE_WITH_LINK, permission: DriveApp.Permission.VIEW, descricao: "Liberado para qualquer pessoa com o link" };
+      return { access: DriveApp.Access.ANYONE_WITH_LINK, descricao: "Qualquer pessoa com link" };
     default:
       return null;
   }
 }
 
+/**
+ * Converte a letra da coluna (A, B, AA...) no índice numérico correspondente (1-based).
+ */
 function letraParaIndiceColuna(letra) {
-  var indice = 0;
-  for (var i = 0; i < letra.length; i++) {
+  let indice = 0;
+  for (let i = 0; i < letra.length; i++) {
     indice = indice * 26 + (letra.charCodeAt(i) - 64);
   }
   return indice;
 }
 
-function extrairIdPlanilha(texto) {
-  texto = String(texto).trim();
+/**
+ * Extrai o ID e o tipo do item (PASTA ou ARQUIVO) a partir do texto/URL fornecido.
+ */
+function extrairInfoDrive(texto) {
+  const limpo = String(texto).trim();
 
-  // Google Sheets nativo: /spreadsheets/d/ID
-  var padraoSheets = texto.match(/\/spreadsheets\/d\/([a-zA-Z0-9_-]+)/);
-  if (padraoSheets && padraoSheets[1]) return padraoSheets[1];
+  // 1. Link de Pasta: /folders/ID ou /drive/u/0/folders/ID
+  const padraoPasta = limpo.match(/\/folders\/([a-zA-Z0-9_-]+)/);
+  if (padraoPasta?.[1]) {
+    return { id: padraoPasta[1], tipo: "PASTA" };
+  }
 
-  // Arquivo genérico do Drive (Excel, PDF, etc): /file/d/ID
-  var padraoArquivo = texto.match(/\/file\/d\/([a-zA-Z0-9_-]+)/);
-  if (padraoArquivo && padraoArquivo[1]) return padraoArquivo[1];
+  // 2. Link de Arquivo/Planilha: /spreadsheets/d/ID, /file/d/ID, /document/d/ID, /presentation/d/ID
+  const padraoArquivo = limpo.match(/\/(?:spreadsheets|file|document|presentation)\/d\/([a-zA-Z0-9_-]+)/);
+  if (padraoArquivo?.[1]) {
+    return { id: padraoArquivo[1], tipo: "ARQUIVO" };
+  }
 
-  // Formato alternativo: ?id=ID (usado em alguns links de compartilhamento)
-  var padraoQuery = texto.match(/[?&]id=([a-zA-Z0-9_-]+)/);
-  if (padraoQuery && padraoQuery[1]) return padraoQuery[1];
+  // 3. Link com query parameter: ?id=ID ou &id=ID
+  const padraoQuery = limpo.match(/[?&]id=([a-zA-Z0-9_-]+)/);
+  if (padraoQuery?.[1]) {
+    return { id: padraoQuery[1], tipo: "ARQUIVO" };
+  }
 
-  // Se o valor já for só o ID puro
-  if (/^[a-zA-Z0-9_-]{15,}$/.test(texto)) return texto;
+  // 4. Se já for o ID puro (tentamos como arquivo por padrão)
+  if (/^[a-zA-Z0-9_-]{15,}$/.test(limpo)) {
+    return { id: limpo, tipo: "ARQUIVO" };
+  }
 
   return null;
 }
+
