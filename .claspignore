@@ -1,0 +1,25 @@
+# Clasp ignore file
+# Arquivos que não devem ser enviados para o Google Apps Script via clasp push
+
+**/**
+!src/**
+!src/appsscript.json
+!src/Code.js
+!appsscript.json
+!code.gs
+
+.git/**
+.github/**
+node_modules/**
+tests/**
+test/**
+coverage/**
+*.md
+LICENSE
+package.json
+package-lock.json
+.eslintrc*
+.prettier*
+.editorconfig
+.clasp.json.example
+
